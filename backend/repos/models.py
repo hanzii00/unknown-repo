@@ -56,3 +56,19 @@ class Star(models.Model):
 
     class Meta:
         unique_together = ['user','repo']
+
+class RepositoryFile(models.Model):
+    repo = models.ForeignKey(Repository, on_delete=models.CASCADE, related_name='files')
+    path = models.CharField(max_length=500)
+    file = models.FileField(upload_to='repos/')
+    size = models.IntegerField()
+    branch = models.CharField(max_length=100, default='main')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['repo', 'path', 'branch']
+        ordering = ['path']
+
+    def __str__(self):
+        return f"{self.repo.name}/{self.path}"

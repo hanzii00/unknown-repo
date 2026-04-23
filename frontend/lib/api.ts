@@ -52,7 +52,7 @@ export const searchUsers = (q: string) => api.get(`/users/search/?q=${q}`);
 // Repos
 export const getUserRepos = (username: string) => api.get(`/repos/${username}/`);
 export const getRepo = (username: string, name: string) => api.get(`/repos/${username}/${name}/`);
-export const createRepo = (data: object) => api.post(`/repos/${getUsername()}/`, data);
+export const createRepo = (username: string, data: object) => api.post(`/repos/${username}/`, data);
 export const starRepo = (username: string, name: string) =>
   api.post(`/repos/${username}/${name}/star/`);
 export const exploreRepos = (params?: { q?: string; language?: string }) =>
@@ -70,11 +70,17 @@ export const getComments = (username: string, repo: string, number: number) =>
 export const createComment = (username: string, repo: string, number: number, body: string) =>
   api.post(`/repos/${username}/${repo}/issues/${number}/comments/`, { body });
 
-function getUsername() {
-  // used for repo creation — ideally pull from auth store
-  if (typeof window !== 'undefined') {
-    const raw = localStorage.getItem('user');
-    if (raw) return JSON.parse(raw).username;
-  }
-  return '';
-}
+// Files
+export const getRepoFiles = (username: string, repo: string, branch = 'main') =>
+  api.get(`/repos/${username}/${repo}/files/?branch=${branch}`);
+export const uploadFile = (username: string, repo: string, file: File, path: string, branch = 'main') => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('path', path);
+  formData.append('branch', branch);
+  return api.post(`/repos/${username}/${repo}/files/`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+export const deleteFile = (username: string, repo: string, fileId: number) =>
+  api.delete(`/repos/${username}/${repo}/files/${fileId}/`);

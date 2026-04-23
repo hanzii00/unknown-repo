@@ -1,12 +1,12 @@
 'use client';
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { AlertCircle, CheckCircle, MessageSquare, Send } from 'lucide-react';
 import { getIssue, getComments, createComment } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 
-export default function IssuePage({ params }: { params: { username: string; repo: string; number: string } }) {
-  const { username, repo, number } = params;
+export default function IssuePage({ params }: { params: Promise<{ username: string; repo: string; number: string }> }) {
+  const { username, repo, number } = React.use(params);
   const { user, isAuthenticated } = useAuthStore();
   const [issue, setIssue] = useState<any>(null);
   const [comments, setComments] = useState<any[]>([]);
@@ -15,14 +15,26 @@ export default function IssuePage({ params }: { params: { username: string; repo
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    Promise.all([
-      getIssue(username, repo, parseInt(number)),
-      getComments(username, repo, parseInt(number)),
-    ]).then(([iss, cmts]) => {
-      setIssue(iss.data);
-      setComments(cmts.data.results || cmts.data);
-    }).finally(() => setLoading(false));
-  }, []);
+    const loadData = async () => {
+      try {
+        const issueRes = await getIssue(username, repo, parseInt(number));
+        setIssue(issueRes.data);
+      } catch (err) {
+        setIssue(null);
+      }
+
+      try {
+        const commentsRes = await getComments(username, repo, parseInt(number));
+        setComments(commentsRes.data.results || commentsRes.data || []);
+      } catch (err) {
+        setComments([]);
+      }
+
+      setLoading(false);
+    };
+
+    loadData();
+  }, [username, repo, number]);
 
   const handleComment = async (e: React.FormEvent) => {
     e.preventDefault();

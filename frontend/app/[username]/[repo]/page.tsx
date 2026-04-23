@@ -1,31 +1,57 @@
 'use client';
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Star, GitFork, Eye, Code, AlertCircle, GitBranch, Copy, Check } from 'lucide-react';
-import { getRepo, starRepo, getIssues } from '@/lib/api';
+import { Star, GitFork, Eye, Code, AlertCircle, GitBranch, Copy, Check, Upload, Trash2, File } from 'lucide-react';
+import { getRepo, starRepo, getIssues, getRepoFiles, uploadFile, deleteFile } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 
 const LANG_COLORS: Record<string,string> = {
   Python:'#3572A5',JavaScript:'#f1e05a',TypeScript:'#2b7489',C:'#555555',Ruby:'#701516',Go:'#00ADD8',Rust:'#dea584',Java:'#b07219',
 };
 
-export default function RepoPage({ params }: { params: { username: string; repo: string } }) {
-  const { username, repo: repoName } = params;
-  const { isAuthenticated } = useAuthStore();
+export default function RepoPage({ params }: { params: Promise<{ username: string; repo: string }> }) {
+  const { username, repo: repoName } = React.use(params);
+  const { isAuthenticated, user } = useAuthStore();
   const router = useRouter();
   const [repo, setRepo] = useState<any>(null);
   const [issues, setIssues] = useState<any[]>([]);
+  const [files, setFiles] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [starring, setStarring] = useState(false);
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState('code');
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    Promise.all([getRepo(username, repoName), getIssues(username, repoName)]).then(([r, iss]) => {
-      setRepo(r.data);
-      setIssues(iss.data.results || iss.data);
-    }).finally(() => setLoading(false));
+    const loadData = async () => {
+      try {
+        const repoRes = await getRepo(username, repoName);
+        setRepo(repoRes.data);
+      } catch (err) {
+        setRepo(null);
+      }
+
+      try {
+        const issuesRes = await getIssues(username, repoName);
+        setIssues(issuesRes.data.results || issuesRes.data || []);
+      } catch (err) {
+        setIssues([]);
+      }
+
+      try {
+        const filesRes = await getRepoFiles(username, repoName);
+        const filesList = Array.isArray(filesRes.data) ? filesRes.data : filesRes.data?.results || [];
+        setFiles(filesList);
+      } catch (err) {
+        setFiles([]);
+      }
+
+      setLoading(false);
+    };
+
+    loadData();
   }, [username, repoName]);
 
   const handleStar = async () => {
@@ -41,6 +67,33 @@ export default function RepoPage({ params }: { params: { username: string; repo:
     navigator.clipboard.writeText(`git clone http://localhost:8000/api/repos/${username}/${repoName}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await uploadFile(username, repoName, file, file.name);
+      const filesRes = await getRepoFiles(username, repoName);
+      const filesList = Array.isArray(filesRes.data) ? filesRes.data : filesRes.data?.results || [];
+      setFiles(filesList);
+    } catch (err) {
+      alert('Failed to upload file');
+    } finally {
+      setUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDeleteFile = async (fileId: number) => {
+    if (!confirm('Delete this file?')) return;
+    try {
+      await deleteFile(username, repoName, fileId);
+      setFiles(files.filter(f => f.id !== fileId));
+    } catch (err) {
+      alert('Failed to delete file');
+    }
   };
 
   if (loading) return (
@@ -145,6 +198,54 @@ export default function RepoPage({ params }: { params: { username: string; repo:
                   <span style={{ display:'flex', alignItems:'center', gap:6 }}><AlertCircle size={13}/><Link href={`/${username}/${repoName}/issues`} style={{ color:'var(--text-primary)', textDecoration:'none' }}><b>{issues.length}</b> issues</Link></span>
                 </div>
               </div>
+            </div>
+
+            {/* Files */}
+            <div className="card" style={{ overflow:'hidden', marginBottom:24 }}>
+              <div style={{ padding:'12px 16px', background:'var(--bg-overlay)', borderBottom:'1px solid var(--border-default)', display:'flex', alignItems:'center', gap:8, justifyContent:'space-between' }}>
+                <span style={{ fontWeight:600, fontSize:14 }}>📁 Files</span>
+                {user?.username === username && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      onChange={handleFileUpload}
+                      style={{ display:'none' }}
+                    />
+                    <button
+                      className="btn btn-secondary"
+                      style={{ height:28, padding:'0 12px', fontSize:12, gap:6 }}
+                      disabled={uploading}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Upload size={12}/> {uploading ? 'Uploading...' : 'Upload'}
+                    </button>
+                  </>
+                )}
+              </div>
+              {files.length === 0 ? (
+                <div style={{ padding:'40px 24px', textAlign:'center', color:'var(--text-secondary)' }}>
+                  <File size={32} style={{ margin:'0 auto 12px', opacity:0.3 }} />
+                  <p style={{ fontSize:14 }}>No files yet. {user?.username === username ? 'Upload files to get started.' : ''}</p>
+                </div>
+              ) : (
+                <div>
+                  {files.map((file: any, i: number) => (
+                    <div key={file.id} style={{ padding:'12px 16px', borderBottom: i<files.length-1?'1px solid var(--border-muted)':'none', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <File size={14} color="var(--accent-blue)" />
+                        <span style={{ fontFamily:'JetBrains Mono, monospace', fontSize:13 }}>{file.path}</span>
+                        <span style={{ fontSize:11, color:'var(--text-secondary)' }}>({(file.size/1024).toFixed(1)}KB)</span>
+                      </div>
+                      {user?.username === username && (
+                        <button onClick={() => handleDeleteFile(file.id)} style={{ background:'none', border:'none', color:'var(--accent-red)', cursor:'pointer', padding:'4px 8px' }}>
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Recent issues preview */}

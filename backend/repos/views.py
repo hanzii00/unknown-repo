@@ -3,9 +3,9 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from .models import Repository, Issue, Comment
+from .models import Repository, Issue, Comment, RepositoryFile
 from .serializers import (RepositorySerializer, RepositoryCreateSerializer,
-                          IssueSerializer, CommentSerializer)
+                          IssueSerializer, CommentSerializer, RepositoryFileSerializer)
 from users.models import User
 
 class RepositoryListCreateView(generics.ListCreateAPIView):
@@ -103,3 +103,48 @@ class CommentListCreateView(generics.ListCreateAPIView):
         issue = get_object_or_404(Issue, repo__owner__username=self.kwargs['username'],
                                   repo__name=self.kwargs['name'], number=self.kwargs['number'])
         serializer.save(issue=issue, author=self.request.user)
+
+class RepositoryFileListCreateView(generics.ListCreateAPIView):
+    serializer_class = RepositoryFileSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        repo = get_object_or_404(Repository, owner__username=self.kwargs['username'], name=self.kwargs['name'])
+        branch = self.request.query_params.get('branch', 'main')
+        return RepositoryFile.objects.filter(repo=repo, branch=branch).order_by('path')
+
+    def perform_create(self, serializer):
+        repo = get_object_or_404(Repository, owner__username=self.kwargs['username'], name=self.kwargs['name'])
+        if repo.owner != self.request.user:
+            self.permission_denied(self.request, 'Only the repo owner can upload files.')
+        
+        file_obj = self.request.FILES.get('file')
+        if not file_obj:
+            return
+        
+        branch = self.request.data.get('branch', 'main')
+        path = self.request.data.get('path', file_obj.name)
+        
+        # Delete existing file with same path if it exists
+        RepositoryFile.objects.filter(repo=repo, path=path, branch=branch).delete()
+        
+        # Create new file
+        serializer.save(repo=repo, file=file_obj, size=file_obj.size, path=path, branch=branch)
+
+class RepositoryFileDetailView(generics.RetrieveDestroyAPIView):
+    serializer_class = RepositoryFileSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        repo = get_object_or_404(Repository, owner__username=self.kwargs['username'], name=self.kwargs['name'])
+        return RepositoryFile.objects.filter(repo=repo)
+
+    def get_object(self):
+        qs = self.get_queryset()
+        file_id = self.kwargs.get('file_id')
+        return get_object_or_404(qs, id=file_id)
+
+    def perform_destroy(self, instance):
+        if instance.repo.owner != self.request.user:
+            self.permission_denied(self.request, 'Only the repo owner can delete files.')
+        instance.delete()
