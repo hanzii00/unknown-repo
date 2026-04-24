@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { MapPin, Link2, Building, Users, Star, GitFork } from 'lucide-react';
 import { getUser, getUserRepos, followUser } from '@/lib/api';
@@ -9,8 +9,8 @@ const LANG_COLORS: Record<string,string> = {
   Python:'#3572A5',JavaScript:'#f1e05a',TypeScript:'#2b7489',C:'#555555',Ruby:'#701516',Go:'#00ADD8',Rust:'#dea584',
 };
 
-export default function UserProfilePage({ params }: { params: { username: string } }) {
-  const { username } = params;
+export default function UserProfilePage({ params }: { params: Promise<{ username: string }> }) {
+  const { username } = React.use(params);
   const { user: me, isAuthenticated } = useAuthStore();
   const [profile, setProfile] = useState<any>(null);
   const [repos, setRepos] = useState<any[]>([]);
@@ -18,11 +18,26 @@ export default function UserProfilePage({ params }: { params: { username: string
   const [following, setFollowing] = useState(false);
 
   useEffect(() => {
-    Promise.all([getUser(username), getUserRepos(username)]).then(([u, r]) => {
-      setProfile(u.data);
-      setFollowing(u.data.is_following);
-      setRepos(r.data.results || r.data);
-    }).finally(() => setLoading(false));
+    const loadData = async () => {
+      try {
+        const userRes = await getUser(username);
+        setProfile(userRes.data);
+        setFollowing(userRes.data.is_following);
+      } catch (err) {
+        setProfile(null);
+      }
+
+      try {
+        const reposRes = await getUserRepos(username);
+        setRepos(reposRes.data.results || reposRes.data || []);
+      } catch (err) {
+        setRepos([]);
+      }
+
+      setLoading(false);
+    };
+
+    loadData();
   }, [username]);
 
   const handleFollow = async () => {

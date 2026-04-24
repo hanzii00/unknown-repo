@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Repository, Issue, Comment
+from .models import Repository, Issue, Comment, RepositoryFile
 from users.serializers import UserSerializer
 
 class RepositorySerializer(serializers.ModelSerializer):
@@ -23,6 +23,9 @@ class RepositoryCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Repository
         fields = ['name','description','visibility','language','default_branch','topics']
+        extra_kwargs = {
+            'language': {'required': True, 'allow_blank': False},
+        }
 
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
@@ -45,3 +48,19 @@ class IssueSerializer(serializers.ModelSerializer):
 
     def get_comments_count(self, obj):
         return obj.comments.count()
+
+class RepositoryFileSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = RepositoryFile
+        fields = ['id','path','file','size','detected_language','branch','created_at','updated_at','file_url']
+        read_only_fields = ['id','size','detected_language','created_at','updated_at','file_url']
+
+    def get_file_url(self, obj):
+        if obj.file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.file.url)
+            return obj.file.url
+        return None

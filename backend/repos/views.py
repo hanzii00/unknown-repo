@@ -1,12 +1,37 @@
 from rest_framework import generics, status, permissions, filters
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from .models import Repository, Issue, Comment
+from .models import Repository, Issue, Comment, RepositoryFile
 from .serializers import (RepositorySerializer, RepositoryCreateSerializer,
-                          IssueSerializer, CommentSerializer)
+                          IssueSerializer, CommentSerializer, RepositoryFileSerializer)
+from .language_detection import detect_language
 from users.models import User
+
+IGNORED_UPLOAD_SEGMENTS = {
+    '.git',
+    '.hg',
+    '.svn',
+    '.next',
+    '.nuxt',
+    '.turbo',
+    '.cache',
+    'node_modules',
+    'dist',
+    'build',
+    'coverage',
+    'vendor',
+    'venv',
+    '.venv',
+    '__pycache__',
+}
+
+
+def should_ignore_upload_path(path):
+    segments = [segment.strip().lower() for segment in str(path).replace('\\', '/').split('/') if segment.strip()]
+    return any(segment in IGNORED_UPLOAD_SEGMENTS for segment in segments)
 
 class RepositoryListCreateView(generics.ListCreateAPIView):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -47,6 +72,16 @@ class RepositoryDetailView(generics.RetrieveUpdateDestroyAPIView):
         if self.request.method in ['PUT','PATCH','DELETE']:
             return [permissions.IsAuthenticated()]
         return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        if serializer.instance.owner != self.request.user:
+            self.permission_denied(self.request, 'Only the repo owner can update this repository.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.owner != self.request.user:
+            self.permission_denied(self.request, 'Only the repo owner can delete this repository.')
+        instance.delete()
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
@@ -103,3 +138,62 @@ class CommentListCreateView(generics.ListCreateAPIView):
         issue = get_object_or_404(Issue, repo__owner__username=self.kwargs['username'],
                                   repo__name=self.kwargs['name'], number=self.kwargs['number'])
         serializer.save(issue=issue, author=self.request.user)
+
+class RepositoryFileListCreateView(generics.ListCreateAPIView):
+    serializer_class = RepositoryFileSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        repo = get_object_or_404(Repository, owner__username=self.kwargs['username'], name=self.kwargs['name'])
+        branch = self.request.query_params.get('branch', 'main')
+        return RepositoryFile.objects.filter(repo=repo, branch=branch).order_by('path')
+
+    def perform_create(self, serializer):
+        repo = get_object_or_404(Repository, owner__username=self.kwargs['username'], name=self.kwargs['name'])
+        if repo.owner != self.request.user:
+            self.permission_denied(self.request, 'Only the repo owner can upload files.')
+        
+        file_obj = self.request.FILES.get('file')
+        if not file_obj:
+            return
+        
+        branch = self.request.data.get('branch', 'main')
+        path = self.request.data.get('path', file_obj.name)
+        if should_ignore_upload_path(path):
+            raise ValidationError({'path': ['This file is inside an ignored folder and cannot be uploaded.']})
+        detected_language = detect_language(file_obj, path)
+
+        # Delete existing file with same path if it exists
+        RepositoryFile.objects.filter(repo=repo, path=path, branch=branch).delete()
+
+        # Create new file
+        serializer.save(
+            repo=repo,
+            file=file_obj,
+            size=file_obj.size,
+            path=path,
+            branch=branch,
+            detected_language=detected_language,
+        )
+
+        if detected_language and not repo.language:
+            repo.language = detected_language
+            repo.save(update_fields=['language', 'updated_at'])
+
+class RepositoryFileDetailView(generics.RetrieveDestroyAPIView):
+    serializer_class = RepositoryFileSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        repo = get_object_or_404(Repository, owner__username=self.kwargs['username'], name=self.kwargs['name'])
+        return RepositoryFile.objects.filter(repo=repo)
+
+    def get_object(self):
+        qs = self.get_queryset()
+        file_id = self.kwargs.get('file_id')
+        return get_object_or_404(qs, id=file_id)
+
+    def perform_destroy(self, instance):
+        if instance.repo.owner != self.request.user:
+            self.permission_denied(self.request, 'Only the repo owner can delete files.')
+        instance.delete()
