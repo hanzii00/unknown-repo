@@ -1,51 +1,222 @@
 'use client';
-import React, { useEffect, useState } from 'react';
+import React, { ChangeEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Star, GitFork, Eye, Code, AlertCircle, GitBranch, Copy, Check, Upload, Trash2, File } from 'lucide-react';
+import { Star, GitFork, Eye, Code, AlertCircle, GitBranch, Copy, Check, Upload, Trash2, File, FolderOpen, Settings } from 'lucide-react';
 import { getRepo, starRepo, getIssues, getRepoFiles, uploadFile, deleteFile } from '@/lib/api';
+import { PendingUpload, prepareUploads, formatRejectedUploadsMessage } from '@/lib/uploadGuards';
 import { useAuthStore } from '@/store/auth';
 
 const LANG_COLORS: Record<string,string> = {
   Python:'#3572A5',JavaScript:'#f1e05a',TypeScript:'#2b7489',C:'#555555',Ruby:'#701516',Go:'#00ADD8',Rust:'#dea584',Java:'#b07219',
 };
 
+type RepoData = {
+  visibility: string;
+  is_starred: boolean;
+  stars_count: number;
+  forks_count: number;
+  default_branch: string;
+  description: string;
+  topics: string[];
+  language: string;
+};
+
+type IssueAuthor = {
+  username: string;
+};
+
+type IssueData = {
+  id: number;
+  number: number;
+  title: string;
+  labels?: string[];
+  author: IssueAuthor;
+  created_at: string;
+  comments_count: number;
+};
+
+type RepoFileData = {
+  id: number;
+  path: string;
+  size: number;
+  detected_language?: string;
+};
+
+type DragFileSystemEntry = {
+  isDirectory: boolean;
+  isFile: boolean;
+  fullPath: string;
+  name: string;
+};
+
+type DragFileSystemFileEntry = DragFileSystemEntry & {
+  file: (callback: (file: File) => void, errorCallback?: (error: DOMException) => void) => void;
+};
+
+type DragFileSystemDirectoryEntry = DragFileSystemEntry & {
+  createReader: () => {
+    readEntries: (
+      successCallback: (entries: DragFileSystemEntry[]) => void,
+      errorCallback?: (error: DOMException) => void,
+    ) => void;
+  };
+};
+
+type DragDataTransferItem = DataTransferItem & {
+  webkitGetAsEntry?: () => DragFileSystemEntry | null;
+  getAsFileSystemHandle?: () => Promise<FileSystemHandleLike>;
+};
+
+type FileSystemHandleKind = 'file' | 'directory';
+
+type FileSystemHandleLike = {
+  kind: FileSystemHandleKind;
+  name: string;
+};
+
+type FileSystemFileHandleLike = FileSystemHandleLike & {
+  kind: 'file';
+  getFile: () => Promise<File>;
+};
+
+type FileSystemDirectoryHandleLike = FileSystemHandleLike & {
+  kind: 'directory';
+  entries: () => AsyncIterableIterator<[string, FileSystemHandleLike]>;
+};
+
+type WindowWithDirectoryPicker = Window & {
+  showDirectoryPicker?: () => Promise<FileSystemDirectoryHandleLike>;
+};
+
+const isDirectoryEntry = (entry: DragFileSystemEntry): entry is DragFileSystemDirectoryEntry =>
+  entry.isDirectory && typeof (entry as DragFileSystemDirectoryEntry).createReader === 'function';
+
+const isFileEntry = (entry: DragFileSystemEntry): entry is DragFileSystemFileEntry =>
+  entry.isFile && typeof (entry as DragFileSystemFileEntry).file === 'function';
+
+const getRelativePath = (file: File) => {
+  const maybeRelativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+  return maybeRelativePath && maybeRelativePath.length > 0 ? maybeRelativePath : file.name;
+};
+
+const readFileEntry = (entry: DragFileSystemFileEntry) =>
+  new Promise<PendingUpload>((resolve, reject) => {
+    entry.file(
+      (file) => resolve({ file, path: entry.fullPath.replace(/^\/+/, '') || file.name }),
+      reject,
+    );
+  });
+
+const readDirectoryEntries = async (directory: DragFileSystemDirectoryEntry): Promise<PendingUpload[]> => {
+  const reader = directory.createReader();
+  const entries: DragFileSystemEntry[] = [];
+
+  while (true) {
+    const batch = await new Promise<DragFileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+
+    if (batch.length === 0) break;
+    entries.push(...batch);
+  }
+
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      if (isDirectoryEntry(entry)) {
+        return readDirectoryEntries(entry);
+      }
+
+      if (isFileEntry(entry)) {
+        return [await readFileEntry(entry)];
+      }
+
+      return [];
+    }),
+  );
+
+  return files.flat();
+};
+
+const readHandle = async (handle: FileSystemHandleLike, prefix = ''): Promise<PendingUpload[]> => {
+  if (handle.kind === 'file') {
+    const file = await (handle as FileSystemFileHandleLike).getFile();
+    return [{ file, path: `${prefix}${handle.name}` }];
+  }
+
+  const files: PendingUpload[] = [];
+  for await (const [, childHandle] of (handle as FileSystemDirectoryHandleLike).entries()) {
+    files.push(...await readHandle(childHandle, `${prefix}${handle.name}/`));
+  }
+
+  return files;
+};
+
 export default function RepoPage({ params }: { params: Promise<{ username: string; repo: string }> }) {
   const { username, repo: repoName } = React.use(params);
   const { isAuthenticated, user } = useAuthStore();
   const router = useRouter();
-  const [repo, setRepo] = useState<any>(null);
-  const [issues, setIssues] = useState<any[]>([]);
-  const [files, setFiles] = useState<any[]>([]);
+  const [repo, setRepo] = useState<RepoData | null>(null);
+  const [issues, setIssues] = useState<IssueData[]>([]);
+  const [files, setFiles] = useState<RepoFileData[]>([]);
+  const [filesNextPage, setFilesNextPage] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [starring, setStarring] = useState(false);
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState('code');
   const [uploading, setUploading] = useState(false);
+  const [loadingMoreFiles, setLoadingMoreFiles] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [uploadNotice, setUploadNotice] = useState('');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const singleFileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const extractFilePage = (data: unknown) => {
+    const pageData = data as { results?: RepoFileData[]; next?: string | null } | RepoFileData[];
+    const filesList = Array.isArray(pageData) ? pageData : pageData?.results || [];
+    const nextUrl = !Array.isArray(pageData) ? pageData?.next : null;
+    let nextPage: number | null = null;
+
+    if (typeof nextUrl === 'string') {
+      try {
+        const parsed = new URL(nextUrl);
+        const pageValue = parsed.searchParams.get('page');
+        nextPage = pageValue ? Number(pageValue) : null;
+      } catch {
+        nextPage = null;
+      }
+    }
+
+    return {
+      filesList,
+      nextPage: Number.isFinite(nextPage) ? nextPage : null,
+    };
+  };
 
   useEffect(() => {
     const loadData = async () => {
       try {
         const repoRes = await getRepo(username, repoName);
         setRepo(repoRes.data);
-      } catch (err) {
+      } catch {
         setRepo(null);
       }
 
       try {
         const issuesRes = await getIssues(username, repoName);
         setIssues(issuesRes.data.results || issuesRes.data || []);
-      } catch (err) {
+      } catch {
         setIssues([]);
       }
 
       try {
-        const filesRes = await getRepoFiles(username, repoName);
-        const filesList = Array.isArray(filesRes.data) ? filesRes.data : filesRes.data?.results || [];
+        const filesRes = await getRepoFiles(username, repoName, 'main', 1);
+        const { filesList, nextPage } = extractFilePage(filesRes.data);
         setFiles(filesList);
-      } catch (err) {
+        setFilesNextPage(nextPage);
+      } catch {
         setFiles([]);
+        setFilesNextPage(null);
       }
 
       setLoading(false);
@@ -59,7 +230,7 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
     setStarring(true);
     try {
       const { data } = await starRepo(username, repoName);
-      setRepo((r: any) => ({ ...r, is_starred: data.starred, stars_count: data.stars_count }));
+      setRepo((currentRepo) => currentRepo ? { ...currentRepo, is_starred: data.starred, stars_count: data.stars_count } : currentRepo);
     } finally { setStarring(false); }
   };
 
@@ -69,29 +240,146 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  useEffect(() => {
+    if (!fileInputRef.current) return;
+    fileInputRef.current.setAttribute('webkitdirectory', '');
+    fileInputRef.current.setAttribute('directory', '');
+  }, []);
+
+  useEffect(() => {
+    const preventWindowDrop = (event: DragEvent) => {
+      event.preventDefault();
+    };
+
+    window.addEventListener('dragover', preventWindowDrop);
+    window.addEventListener('drop', preventWindowDrop);
+
+    return () => {
+      window.removeEventListener('dragover', preventWindowDrop);
+      window.removeEventListener('drop', preventWindowDrop);
+    };
+  }, []);
+
+  const refreshFiles = async () => {
+    const filesRes = await getRepoFiles(username, repoName, 'main', 1);
+    const { filesList, nextPage } = extractFilePage(filesRes.data);
+    setFiles(filesList);
+    setFilesNextPage(nextPage);
+  };
+
+  const loadMoreFiles = async () => {
+    if (!filesNextPage || loadingMoreFiles) return;
+
+    setLoadingMoreFiles(true);
+    try {
+      const filesRes = await getRepoFiles(username, repoName, 'main', filesNextPage);
+      const { filesList, nextPage } = extractFilePage(filesRes.data);
+      setFiles((current) => [...current, ...filesList]);
+      setFilesNextPage(nextPage);
+    } finally {
+      setLoadingMoreFiles(false);
+    }
+  };
+
+  const uploadFiles = async (selectedFiles: PendingUpload[]) => {
+    const prepared = prepareUploads(selectedFiles);
+    const rejectedMessage = formatRejectedUploadsMessage(prepared);
+
+    if (rejectedMessage) {
+      setUploadNotice(rejectedMessage);
+    } else {
+      setUploadNotice('');
+    }
+
+    if (prepared.accepted.length === 0) {
+      if (rejectedMessage) alert(rejectedMessage);
+      return;
+    }
+
     setUploading(true);
     try {
-      await uploadFile(username, repoName, file, file.name);
-      const filesRes = await getRepoFiles(username, repoName);
-      const filesList = Array.isArray(filesRes.data) ? filesRes.data : filesRes.data?.results || [];
-      setFiles(filesList);
-    } catch (err) {
-      alert('Failed to upload file');
+      for (const item of prepared.accepted) {
+        await uploadFile(username, repoName, item.file, item.path);
+      }
+      await refreshFiles();
+    } catch {
+      alert(prepared.accepted.length > 1 ? 'Failed to upload folder' : 'Failed to upload file');
     } finally {
       setUploading(false);
-      e.target.value = '';
     }
+  };
+
+  const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(e.target.files || []).map((file) => ({
+      file,
+      path: getRelativePath(file),
+    }));
+    await uploadFiles(selectedFiles);
+    e.target.value = '';
+  };
+
+  const handleDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+
+    const items = Array.from(event.dataTransfer.items || []) as DragDataTransferItem[];
+    if (items.length === 0) {
+      await uploadFiles(
+        Array.from(event.dataTransfer.files || []).map((file) => ({ file, path: getRelativePath(file) })),
+      );
+      return;
+    }
+
+    const uploads: PendingUpload[] = [];
+
+    for (const item of items) {
+      const handle = await item.getAsFileSystemHandle?.();
+      if (handle) {
+        uploads.push(...await readHandle(handle));
+        continue;
+      }
+
+      const entry = item.webkitGetAsEntry?.();
+
+      if (entry && isDirectoryEntry(entry)) {
+        uploads.push(...await readDirectoryEntries(entry));
+        continue;
+      }
+
+      const droppedFile = item.getAsFile();
+      if (entry && isFileEntry(entry) && droppedFile) {
+        uploads.push({
+          file: droppedFile,
+          path: entry.fullPath.replace(/^\/+/, '') || getRelativePath(droppedFile),
+        });
+        continue;
+      }
+
+      if (droppedFile) {
+        uploads.push({ file: droppedFile, path: getRelativePath(droppedFile) });
+      }
+    }
+
+    await uploadFiles(uploads);
+  };
+
+  const handleChooseFolder = async () => {
+    const directoryPicker = (window as WindowWithDirectoryPicker).showDirectoryPicker;
+    if (directoryPicker) {
+      const handle = await directoryPicker();
+      await uploadFiles(await readHandle(handle));
+      return;
+    }
+
+    fileInputRef.current?.click();
   };
 
   const handleDeleteFile = async (fileId: number) => {
     if (!confirm('Delete this file?')) return;
     try {
       await deleteFile(username, repoName, fileId);
-      setFiles(files.filter(f => f.id !== fileId));
-    } catch (err) {
+      setFiles((current) => current.filter((f) => f.id !== fileId));
+    } catch {
       alert('Failed to delete file');
     }
   };
@@ -120,6 +408,12 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
         <span style={{ fontWeight:700, fontSize:18 }}>{repoName}</span>
         <span className="badge" style={{ background:'var(--bg-overlay)', color:'var(--text-secondary)', fontSize:12, border:'1px solid var(--border-default)' }}>{repo.visibility}</span>
         <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
+          {user?.username === username && (
+            <Link href={`/${username}/${repoName}/settings`} className="btn btn-secondary" style={{ gap: 6 }}>
+              <Settings size={15} />
+              Settings
+            </Link>
+          )}
           <button
             onClick={handleStar}
             disabled={starring}
@@ -209,20 +503,70 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
                     <input
                       ref={fileInputRef}
                       type="file"
+                      multiple
                       onChange={handleFileUpload}
                       style={{ display:'none' }}
                     />
-                    <button
-                      className="btn btn-secondary"
-                      style={{ height:28, padding:'0 12px', fontSize:12, gap:6 }}
-                      disabled={uploading}
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <Upload size={12}/> {uploading ? 'Uploading...' : 'Upload'}
-                    </button>
+                    <input
+                      ref={singleFileInputRef}
+                      type="file"
+                      multiple
+                      onChange={handleFileUpload}
+                      style={{ display:'none' }}
+                    />
+                    <div style={{ display:'flex', gap:8 }}>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ height:28, padding:'0 12px', fontSize:12, gap:6 }}
+                        disabled={uploading}
+                        onClick={handleChooseFolder}
+                      >
+                        <Upload size={12}/> {uploading ? 'Uploading...' : 'Upload folder'}
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ height:28, padding:'0 12px', fontSize:12, gap:6 }}
+                        disabled={uploading}
+                        onClick={() => singleFileInputRef.current?.click()}
+                      >
+                        <File size={12}/> Upload files
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
+              {user?.username === username && (
+                <div
+                  onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={handleDrop}
+                  style={{
+                    margin:16,
+                    border:`1px dashed ${isDragging ? 'var(--accent-blue)' : 'var(--border-default)'}`,
+                    borderRadius:8,
+                    padding:'18px 16px',
+                    background:isDragging ? 'rgba(47,129,247,0.08)' : 'var(--bg-overlay)',
+                    transition:'all 0.15s ease',
+                  }}
+                >
+                  <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                    <div style={{ width:36, height:36, borderRadius:999, background:'rgba(47,129,247,0.12)', display:'flex', alignItems:'center', justifyContent:'center', color:'var(--accent-blue)' }}>
+                      {isDragging ? <FolderOpen size={16} /> : <Upload size={16} />}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight:600, fontSize:14 }}>Drop files or a folder here</div>
+                      <div style={{ color:'var(--text-secondary)', fontSize:13 }}>
+                        Drag from your file explorer, or use the upload buttons above.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {uploadNotice && (
+                <div style={{ margin:'0 16px 16px', padding:'10px 12px', borderRadius:6, background:'rgba(255,166,0,0.12)', color:'var(--text-primary)', fontSize:13, border:'1px solid rgba(255,166,0,0.25)' }}>
+                  {uploadNotice}
+                </div>
+              )}
               {files.length === 0 ? (
                 <div style={{ padding:'40px 24px', textAlign:'center', color:'var(--text-secondary)' }}>
                   <File size={32} style={{ margin:'0 auto 12px', opacity:0.3 }} />
@@ -230,12 +574,17 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
                 </div>
               ) : (
                 <div>
-                  {files.map((file: any, i: number) => (
+                  {files.map((file, i: number) => (
                     <div key={file.id} style={{ padding:'12px 16px', borderBottom: i<files.length-1?'1px solid var(--border-muted)':'none', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
                       <div style={{ display:'flex', alignItems:'center', gap:8 }}>
                         <File size={14} color="var(--accent-blue)" />
                         <span style={{ fontFamily:'JetBrains Mono, monospace', fontSize:13 }}>{file.path}</span>
                         <span style={{ fontSize:11, color:'var(--text-secondary)' }}>({(file.size/1024).toFixed(1)}KB)</span>
+                        {file.detected_language && (
+                          <span className="badge" style={{ background:'var(--bg-overlay)', color:'var(--text-secondary)', fontSize:11 }}>
+                            {file.detected_language}
+                          </span>
+                        )}
                       </div>
                       {user?.username === username && (
                         <button onClick={() => handleDeleteFile(file.id)} style={{ background:'none', border:'none', color:'var(--accent-red)', cursor:'pointer', padding:'4px 8px' }}>
@@ -244,6 +593,18 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
                       )}
                     </div>
                   ))}
+                  {filesNextPage && (
+                    <div style={{ padding:'16px', borderTop:'1px solid var(--border-muted)', display:'flex', justifyContent:'center' }}>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={loadMoreFiles}
+                        disabled={loadingMoreFiles}
+                        style={{ padding:'6px 12px', fontSize:13 }}
+                      >
+                        {loadingMoreFiles ? 'Loading...' : 'Load more files'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -255,7 +616,7 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
                   <span style={{ fontWeight:600 }}>Open Issues</span>
                   <Link href={`/${username}/${repoName}/issues`} style={{ fontSize:13 }}>View all</Link>
                 </div>
-                {issues.slice(0,3).map((iss: any) => (
+                {issues.slice(0,3).map((iss) => (
                   <div key={iss.id} style={{ padding:'12px 16px', borderBottom:'1px solid var(--border-muted)', display:'flex', gap:10 }}>
                     <AlertCircle size={16} color="var(--accent-green)" style={{ marginTop:2, flexShrink:0 }} />
                     <div>
@@ -325,7 +686,7 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
                 <AlertCircle size={40} style={{ margin:'0 auto 12px', opacity:0.3 }} />
                 <p>No open issues</p>
               </div>
-            ) : issues.map((iss: any, i: number) => (
+            ) : issues.map((iss, i: number) => (
               <div key={iss.id} style={{ padding:'16px', borderBottom: i<issues.length-1?'1px solid var(--border-muted)':'none', display:'flex', gap:12 }}>
                 <AlertCircle size={16} color="var(--accent-green)" style={{ marginTop:2, flexShrink:0 }} />
                 <div style={{ flex:1 }}>

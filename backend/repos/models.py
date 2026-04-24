@@ -62,6 +62,7 @@ class RepositoryFile(models.Model):
     path = models.CharField(max_length=500)
     file = models.FileField(upload_to='repos/')
     size = models.IntegerField()
+    detected_language = models.CharField(max_length=50, blank=True)
     branch = models.CharField(max_length=100, default='main')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

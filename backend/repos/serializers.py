@@ -23,6 +23,9 @@ class RepositoryCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Repository
         fields = ['name','description','visibility','language','default_branch','topics']
+        extra_kwargs = {
+            'language': {'required': True, 'allow_blank': False},
+        }
 
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
@@ -51,8 +54,8 @@ class RepositoryFileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RepositoryFile
-        fields = ['id','path','file','size','branch','created_at','updated_at','file_url']
-        read_only_fields = ['id','size','created_at','updated_at','file_url']
+        fields = ['id','path','file','size','detected_language','branch','created_at','updated_at','file_url']
+        read_only_fields = ['id','size','detected_language','created_at','updated_at','file_url']
 
     def get_file_url(self, obj):
         if obj.file:

@@ -18,12 +18,19 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
-    if (error.response?.status === 401) {
+    const requestUrl = String(error.config?.url || '');
+    const isAuthRequest =
+      requestUrl.includes('/users/login/') ||
+      requestUrl.includes('/users/register/') ||
+      requestUrl.includes('/users/token/refresh/');
+
+    if (error.response?.status === 401 && !isAuthRequest && !error.config?._retry) {
       const refresh = typeof window !== 'undefined' ? localStorage.getItem('refresh_token') : null;
       if (refresh) {
         try {
           const { data } = await axios.post(`${API_BASE}/users/token/refresh/`, { refresh });
           localStorage.setItem('access_token', data.access);
+          error.config._retry = true;
           error.config.headers.Authorization = `Bearer ${data.access}`;
           return api.request(error.config);
         } catch {
@@ -53,6 +60,9 @@ export const searchUsers = (q: string) => api.get(`/users/search/?q=${q}`);
 export const getUserRepos = (username: string) => api.get(`/repos/${username}/`);
 export const getRepo = (username: string, name: string) => api.get(`/repos/${username}/${name}/`);
 export const createRepo = (username: string, data: object) => api.post(`/repos/${username}/`, data);
+export const updateRepo = (username: string, name: string, data: object) =>
+  api.patch(`/repos/${username}/${name}/`, data);
+export const deleteRepo = (username: string, name: string) => api.delete(`/repos/${username}/${name}/`);
 export const starRepo = (username: string, name: string) =>
   api.post(`/repos/${username}/${name}/star/`);
 export const exploreRepos = (params?: { q?: string; language?: string }) =>
@@ -71,8 +81,10 @@ export const createComment = (username: string, repo: string, number: number, bo
   api.post(`/repos/${username}/${repo}/issues/${number}/comments/`, { body });
 
 // Files
-export const getRepoFiles = (username: string, repo: string, branch = 'main') =>
-  api.get(`/repos/${username}/${repo}/files/?branch=${branch}`);
+export const getRepoFiles = (username: string, repo: string, branch = 'main', page = 1) =>
+  api.get(`/repos/${username}/${repo}/files/`, {
+    params: { branch, page },
+  });
 export const uploadFile = (username: string, repo: string, file: File, path: string, branch = 'main') => {
   const formData = new FormData();
   formData.append('file', file);

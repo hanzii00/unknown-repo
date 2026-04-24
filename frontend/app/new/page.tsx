@@ -3,15 +3,11 @@ import { ChangeEvent, DragEvent as ReactDragEvent, useEffect, useMemo, useRef, u
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/store/auth';
 import { createRepo, uploadFile } from '@/lib/api';
+import { PendingUpload, prepareUploads, formatRejectedUploadsMessage } from '@/lib/uploadGuards';
 import { Lock, Globe, FolderOpen, Upload, X } from 'lucide-react';
 import axios from 'axios';
 
 const LANGUAGES = ['Python','JavaScript','TypeScript','C','C++','Ruby','Go','Rust','Java','Swift','Kotlin'];
-
-type PendingUpload = {
-  file: File;
-  path: string;
-};
 
 type DragFileSystemEntry = {
   isDirectory: boolean;
@@ -130,6 +126,7 @@ export default function NewRepoPage() {
   const [loading, setLoading] = useState(false);
   const [files, setFiles] = useState<PendingUpload[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [uploadNotice, setUploadNotice] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -167,11 +164,9 @@ export default function NewRepoPage() {
 
   const mergeFiles = (incoming: PendingUpload[]) => {
     setFiles((current) => {
-      const fileMap = new Map(current.map((item) => [item.path, item]));
-      for (const item of incoming) {
-        fileMap.set(item.path, item);
-      }
-      return Array.from(fileMap.values()).sort((a, b) => a.path.localeCompare(b.path));
+      const prepared = prepareUploads([...current, ...incoming]);
+      setUploadNotice(formatRejectedUploadsMessage(prepared));
+      return [...prepared.accepted].sort((a, b) => a.path.localeCompare(b.path));
     });
   };
 
@@ -347,7 +342,6 @@ export default function NewRepoPage() {
               type="file"
               multiple
               onChange={handleFileSelection}
-              {...({ webkitdirectory: true, directory: true } as Record<string, boolean>)}
               style={{ display:'none' }}
             />
             <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:8 }}>
@@ -391,6 +385,12 @@ export default function NewRepoPage() {
                 Choose files
               </button>
             </div>
+
+            {uploadNotice && (
+              <div style={{ marginTop:16, padding:'10px 12px', borderRadius:6, background:'rgba(255,166,0,0.12)', color:'var(--text-primary)', fontSize:13, border:'1px solid rgba(255,166,0,0.25)' }}>
+                {uploadNotice}
+              </div>
+            )}
 
             {files.length > 0 && (
               <div style={{ marginTop:16, borderTop:'1px solid var(--border-default)', paddingTop:16 }}>
