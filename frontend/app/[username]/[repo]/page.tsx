@@ -3,6 +3,8 @@ import React, { ChangeEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Star, GitFork, Eye, Code, AlertCircle, GitBranch, Copy, Check, Upload, Trash2, File, FolderOpen, Settings } from 'lucide-react';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import Toast, { ToastMessage, ToastTone } from '@/components/ui/Toast';
 import { getRepo, starRepo, getIssues, getRepoFiles, uploadFile, deleteFile } from '@/lib/api';
 import { PendingUpload, prepareUploads, formatRejectedUploadsMessage } from '@/lib/uploadGuards';
 import { useAuthStore } from '@/store/auth';
@@ -168,8 +170,19 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
   const [loadingMoreFiles, setLoadingMoreFiles] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [uploadNotice, setUploadNotice] = useState('');
+  const [toastMessages, setToastMessages] = useState<ToastMessage[]>([]);
+  const [filePendingDelete, setFilePendingDelete] = useState<RepoFileData | null>(null);
+  const [deletingFileId, setDeletingFileId] = useState<number | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const singleFileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const pushToast = React.useCallback((tone: ToastTone, message: string) => {
+    setToastMessages((current) => [...current, { id: Date.now() + Math.random(), tone, message }]);
+  }, []);
+
+  const dismissToast = React.useCallback((id: number) => {
+    setToastMessages((current) => current.filter((toast) => toast.id !== id));
+  }, []);
 
   const extractFilePage = (data: unknown) => {
     const pageData = data as { results?: RepoFileData[]; next?: string | null } | RepoFileData[];
@@ -292,7 +305,7 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
     }
 
     if (prepared.accepted.length === 0) {
-      if (rejectedMessage) alert(rejectedMessage);
+      if (rejectedMessage) pushToast('warning', rejectedMessage);
       return;
     }
 
@@ -302,8 +315,10 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
         await uploadFile(username, repoName, item.file, item.path);
       }
       await refreshFiles();
+      setUploadNotice('');
+      pushToast('success', prepared.accepted.length > 1 ? 'Folder uploaded successfully.' : 'File uploaded successfully.');
     } catch {
-      alert(prepared.accepted.length > 1 ? 'Failed to upload folder' : 'Failed to upload file');
+      pushToast('error', prepared.accepted.length > 1 ? 'Failed to upload folder.' : 'Failed to upload file.');
     } finally {
       setUploading(false);
     }
@@ -374,13 +389,19 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
     fileInputRef.current?.click();
   };
 
-  const handleDeleteFile = async (fileId: number) => {
-    if (!confirm('Delete this file?')) return;
+  const handleDeleteFile = async () => {
+    if (!filePendingDelete) return;
+
+    setDeletingFileId(filePendingDelete.id);
     try {
-      await deleteFile(username, repoName, fileId);
-      setFiles((current) => current.filter((f) => f.id !== fileId));
+      await deleteFile(username, repoName, filePendingDelete.id);
+      setFiles((current) => current.filter((f) => f.id !== filePendingDelete.id));
+      pushToast('success', `Deleted ${filePendingDelete.path}.`);
     } catch {
-      alert('Failed to delete file');
+      pushToast('error', 'Failed to delete file.');
+    } finally {
+      setDeletingFileId(null);
+      setFilePendingDelete(null);
     }
   };
 
@@ -400,6 +421,20 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
 
   return (
     <div style={{ maxWidth:1280, margin:'0 auto', padding:'24px 24px 0' }}>
+      <Toast toasts={toastMessages} onDismiss={dismissToast} />
+      <ConfirmDialog
+        open={Boolean(filePendingDelete)}
+        title="Delete file?"
+        description={filePendingDelete ? `This will permanently remove ${filePendingDelete.path} from the repository.` : ''}
+        confirmLabel="Delete file"
+        tone="danger"
+        busy={deletingFileId !== null}
+        onConfirm={handleDeleteFile}
+        onCancel={() => {
+          if (deletingFileId !== null) return;
+          setFilePendingDelete(null);
+        }}
+      />
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:16, flexWrap:'wrap' }}>
         <GitBranch size={18} color="var(--text-secondary)" />
@@ -587,7 +622,7 @@ export default function RepoPage({ params }: { params: Promise<{ username: strin
                         )}
                       </div>
                       {user?.username === username && (
-                        <button onClick={() => handleDeleteFile(file.id)} style={{ background:'none', border:'none', color:'var(--accent-red)', cursor:'pointer', padding:'4px 8px' }}>
+                        <button onClick={() => setFilePendingDelete(file)} style={{ background:'none', border:'none', color:'var(--accent-red)', cursor:'pointer', padding:'4px 8px' }}>
                           <Trash2 size={14} />
                         </button>
                       )}

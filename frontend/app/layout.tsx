@@ -3,7 +3,7 @@ import './globals.css';
 import Navbar from '@/components/layout/Navbar';
 
 export const metadata: Metadata = {
-  title: 'GitClone – Code, Collaborate, Ship',
+  title: 'GitClone',
   description: 'A GitHub clone built with Next.js and Django',
 };
 
