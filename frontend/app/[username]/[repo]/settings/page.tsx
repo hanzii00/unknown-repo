@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from 'axios';
 import { AlertTriangle, ArrowLeft, Lock, Globe, Settings2, Trash2 } from 'lucide-react';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import Toast, { ToastMessage, ToastTone } from '@/components/ui/Toast';
 import { deleteRepo, getRepo, updateRepo } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 
@@ -29,6 +31,9 @@ export default function RepoSettingsPage({ params }: { params: Promise<{ usernam
   const [deleting, setDeleting] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [errors, setErrors] = useState<Record<string, string[]>>({});
+  const [toastMessages, setToastMessages] = useState<ToastMessage[]>([]);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteConfirmationName, setDeleteConfirmationName] = useState('');
   const [form, setForm] = useState({
     name: '',
     description: '',
@@ -65,6 +70,14 @@ export default function RepoSettingsPage({ params }: { params: Promise<{ usernam
     loadRepo();
   }, [username, repoName]);
 
+  const pushToast = React.useCallback((tone: ToastTone, message: string) => {
+    setToastMessages((current) => [...current, { id: Date.now() + Math.random(), tone, message }]);
+  }, []);
+
+  const dismissToast = React.useCallback((id: number) => {
+    setToastMessages((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
   const isOwner = user?.username === username;
 
   const handleSave = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -88,6 +101,7 @@ export default function RepoSettingsPage({ params }: { params: Promise<{ usernam
       const { data } = await updateRepo(username, repoName, payload);
       setRepo(data);
       setStatusMessage('Repository settings saved.');
+      pushToast('success', 'Repository settings saved.');
 
       if (data.name && data.name !== repoName) {
         router.replace(`/${username}/${data.name}/settings`);
@@ -106,15 +120,13 @@ export default function RepoSettingsPage({ params }: { params: Promise<{ usernam
   const handleDelete = async () => {
     if (!isOwner || !repo) return;
 
-    const confirmedName = window.prompt(`Type ${repo.name} to delete this repository permanently.`);
-    if (confirmedName !== repo.name) return;
-
     setDeleting(true);
     try {
       await deleteRepo(username, repoName);
       router.push(`/${username}`);
     } catch {
       setErrors({ non_field_errors: ['Failed to delete repository.'] });
+      pushToast('error', 'Failed to delete repository.');
       setDeleting(false);
     }
   };
@@ -149,6 +161,26 @@ export default function RepoSettingsPage({ params }: { params: Promise<{ usernam
 
   return (
     <div style={{ maxWidth: 1080, margin: '0 auto', padding: '32px 24px 48px' }}>
+      <Toast toasts={toastMessages} onDismiss={dismissToast} />
+      <ConfirmDialog
+        open={showDeleteDialog}
+        title="Delete repository?"
+        description={`This action is permanent. Type ${repo.name} to confirm deletion of ${username}/${repo.name}.`}
+        confirmLabel="Delete repository"
+        tone="danger"
+        busy={deleting}
+        confirmationValue={repo.name}
+        confirmationLabel={`Type ${repo.name} to continue`}
+        confirmationPlaceholder={repo.name}
+        confirmationInput={deleteConfirmationName}
+        onConfirmationInputChange={setDeleteConfirmationName}
+        onConfirm={handleDelete}
+        onCancel={() => {
+          if (deleting) return;
+          setShowDeleteDialog(false);
+          setDeleteConfirmationName('');
+        }}
+      />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
         <div>
           <Link href={`/${username}/${repoName}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8 }}>
@@ -319,7 +351,15 @@ export default function RepoSettingsPage({ params }: { params: Promise<{ usernam
                   This cannot be undone.
                 </div>
               </div>
-              <button className="btn btn-danger" type="button" onClick={handleDelete} disabled={deleting}>
+              <button
+                className="btn btn-danger"
+                type="button"
+                onClick={() => {
+                  setErrors({});
+                  setShowDeleteDialog(true);
+                }}
+                disabled={deleting}
+              >
                 <Trash2 size={15} />
                 {deleting ? 'Deleting...' : 'Delete repository'}
               </button>
